@@ -52,4 +52,8 @@ def main(n: int = 5000) -> None:
     print(f"Chars: avg={avg_len:.1f}, min={min_len}, max={max_len}")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--n", type=int, default=20000)
+    args = p.parse_args()
+    main(args.n)
