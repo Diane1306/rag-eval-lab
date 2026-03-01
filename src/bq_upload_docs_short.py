@@ -1,8 +1,12 @@
 # src/bq_upload_docs_short.py
-# Upload docs_short.jsonl into BigQuery table rag_eval_lab.docs_short using batched streaming inserts.
+# Upload docs_short.jsonl into BigQuery table rag_eval_lab.docs_short.
+# IMPORTANT BEHAVIOR:
+#   - This script TRUNCATES the target table before inserting.
+#   - This makes the script idempotent: re-running it will not create duplicates.
+#   - Inserts are batched to avoid BigQuery streaming request size limits (413 errors).
 
-import json  # To parse JSONL lines into Python dicts.
-from pathlib import Path  # For filesystem path handling.
+import json  # Parse JSONL lines into Python dicts (rows).
+from pathlib import Path  # Robust filesystem paths.
 
 from google.cloud import bigquery  # BigQuery client library.
 
@@ -10,111 +14,141 @@ from google.cloud import bigquery  # BigQuery client library.
 # Configuration
 # -----------------------------
 
-PROJECT_ID = None  # None means: use the default project from your ADC credentials.
+PROJECT_ID = None  # None => use the default project from Application Default Credentials (ADC).
+DATASET = "rag_eval_lab"  # BigQuery dataset name.
+TABLE = "docs_short"  # BigQuery table name.
 
-DATASET = "rag_eval_lab"  # Your BigQuery dataset name.
-TABLE = "docs_short"      # Target table name inside the dataset.
-
-SRC = Path("data/processed/docs_short.jsonl")  # Input JSONL file created by ingest_short.py.
+SRC = Path("data/processed/docs_short.jsonl")  # Input file produced by src/ingest_short.py.
 
 # -----------------------------
-# BigQuery table schema
+# BigQuery Schema (table columns)
 # -----------------------------
-# We define a schema so BigQuery knows the column types and required fields.
+# We explicitly define the schema so table creation is deterministic.
 
 SCHEMA = [
-    bigquery.SchemaField("doc_id", "STRING", mode="REQUIRED"),    # Unique doc identifier.
-    bigquery.SchemaField("title", "STRING", mode="NULLABLE"),     # Optional title.
-    bigquery.SchemaField("source", "STRING", mode="NULLABLE"),    # Dataset/source label.
-    bigquery.SchemaField("text", "STRING", mode="REQUIRED"),      # Full doc text (Q/A + context).
-    bigquery.SchemaField("url", "STRING", mode="NULLABLE"),       # Optional URL (empty in our dataset).
+    bigquery.SchemaField("doc_id", "STRING", mode="REQUIRED"),  # Unique document identifier.
+    bigquery.SchemaField("title", "STRING", mode="NULLABLE"),  # Optional title.
+    bigquery.SchemaField("source", "STRING", mode="NULLABLE"),  # Dataset/source label.
+    bigquery.SchemaField("text", "STRING", mode="REQUIRED"),  # Document text payload.
+    bigquery.SchemaField("url", "STRING", mode="NULLABLE"),  # Optional URL (often blank here).
 ]
 
 
 def ensure_table(client: bigquery.Client, dataset_id: str, table_id: str) -> str:
     """
-    Create the BigQuery table if it doesn't exist; otherwise return its ID.
+    Ensure the BigQuery table exists; create it if missing.
 
     Inputs:
-      - client: BigQuery Client authenticated via ADC.
-      - dataset_id: dataset name (e.g., rag_eval_lab).
-      - table_id: table name (e.g., docs_short).
+      - client: authenticated BigQuery client
+      - dataset_id: dataset name (e.g., rag_eval_lab)
+      - table_id: table name (e.g., docs_short)
 
     Output:
-      - full table id string: "<project>.<dataset>.<table>"
+      - fully qualified table id: "<project>.<dataset>.<table>"
     """
 
-    # Construct the fully qualified table ID using the client's active project.
+    # Build a fully qualified table id using the client's project.
     full_table_id = f"{client.project}.{dataset_id}.{table_id}"
 
     try:
-        # Attempt to fetch the table metadata; this succeeds if the table exists.
+        # Attempt to retrieve table metadata; if this succeeds, table exists.
         client.get_table(full_table_id)
-        return full_table_id  # If table exists, return its ID.
+        return full_table_id
     except Exception:
-        # If get_table fails (usually NotFound), we create the table with the schema.
-        table = bigquery.Table(full_table_id, schema=SCHEMA)  # Define the table object.
-        table = client.create_table(table)  # Create the table in BigQuery.
-        return table.full_table_id  # Return the created table's ID.
+        # If table doesn't exist (usually NotFound), create it with the schema.
+        table = bigquery.Table(full_table_id, schema=SCHEMA)
+        table = client.create_table(table)
+        return table.full_table_id
+
+
+def truncate_table(client: bigquery.Client, full_table_id: str) -> None:
+    """
+    TRUNCATE the target table (delete all rows, keep schema).
+
+    Why:
+      - BigQuery streaming inserts do not deduplicate automatically.
+      - If you run the same insert twice, you'll get duplicates.
+      - TRUNCATE ensures each run starts from a clean table.
+
+    Inputs:
+      - client: authenticated BigQuery client
+      - full_table_id: "<project>.<dataset>.<table>"
+    """
+
+    # Construct a TRUNCATE SQL statement.
+    # Backticks are required in BigQuery for fully qualified identifiers.
+    sql = f"TRUNCATE TABLE `{full_table_id}`"
+
+    # Execute the query as a job.
+    job = client.query(sql)
+
+    # Wait for completion so we know truncation finished before inserting new rows.
+    job.result()
+
+    print(f"Truncated table: {full_table_id}")
 
 
 def main(max_rows: int = 20000, batch_size: int = 200) -> None:
     """
-    Upload JSONL docs to BigQuery using batched streaming inserts.
+    Main upload routine.
 
-    Why batching matters:
-      - BigQuery streaming insert endpoint has request size limits.
-      - Sending 20k rows in one request can exceed the limit (413 error).
+    Steps:
+      1) Ensure input JSONL exists
+      2) Create BigQuery client
+      3) Ensure table exists
+      4) TRUNCATE table to avoid duplicates
+      5) Read JSONL rows
+      6) Insert rows in batches using streaming inserts
 
     Inputs:
-      - max_rows: maximum number of JSONL rows to upload.
-      - batch_size: number of rows per API call (smaller avoids 413).
-
-    Output:
-      - BigQuery table filled with rows.
+      - max_rows: number of records to upload (default 20000)
+      - batch_size: rows per API request (default 200, prevents 413)
     """
 
-    # Ensure the input file exists.
-    assert SRC.exists(), f"Missing {SRC}. Run Day 2 ingest first."
+    # 1) Verify input exists.
+    assert SRC.exists(), f"Missing {SRC}. Run src/ingest_short.py first."
 
-    # Create a BigQuery client (uses ADC credentials by default).
+    # 2) Create a BigQuery client (uses ADC by default).
     client = bigquery.Client(project=PROJECT_ID)
 
-    # Ensure the target table exists and get its full ID.
+    # 3) Ensure the table exists.
     full_table_id = ensure_table(client, DATASET, TABLE)
 
-    # Read JSONL rows into memory (20k is fine for a laptop).
-    rows = []  # List of dicts (each dict = one row).
+    # 4) TRUNCATE the table before inserting to avoid duplicates.
+    truncate_table(client, full_table_id)
+
+    # 5) Read JSONL into a list of row dicts.
+    rows = []
     with SRC.open("r", encoding="utf-8") as f:
         for i, line in enumerate(f):
-            if i >= max_rows:  # Stop once we reach the maximum requested rows.
+            if i >= max_rows:
                 break
-            rows.append(json.loads(line))  # Parse JSON line to dict and store.
+            # Parse each JSON line into a dict.
+            rows.append(json.loads(line))
 
-    total = 0  # Track how many rows have been successfully inserted so far.
+    # 6) Insert in batches to avoid request entity too large (413).
+    total_inserted = 0
 
-    # Loop over the rows list in chunks of size batch_size.
     for start in range(0, len(rows), batch_size):
-        batch = rows[start : start + batch_size]  # Slice out the next batch of rows.
+        batch = rows[start : start + batch_size]
 
-        # Insert this batch using streaming inserts.
-        # Returns [] if successful; otherwise returns a list of error details.
+        # insert_rows_json returns [] on success; otherwise it returns error details.
         errors = client.insert_rows_json(full_table_id, batch)
 
-        # If BigQuery reports errors, stop and show some error detail.
         if errors:
+            # If errors occur, stop and show a small subset to debug.
             raise RuntimeError(f"Insert errors near row {start} (first 3): {errors[:3]}")
 
-        total += len(batch)  # Update inserted row count.
+        total_inserted += len(batch)
 
-        # Periodically print progress so you know it's working.
-        if total % 2000 == 0:
-            print(f"Inserted {total}/{len(rows)}...")
+        # Print progress every 2000 rows so you can see it moving.
+        if total_inserted % 2000 == 0:
+            print(f"Inserted {total_inserted}/{len(rows)}...")
 
-    # Final success message.
-    print(f"Inserted {total} rows into {full_table_id}")
+    print(f"Inserted {total_inserted} rows into {full_table_id}")
 
 
 if __name__ == "__main__":
-    # Run main with defaults (20k rows, batched by 200).
+    # Optional: add CLI arguments later if you want.
+    # For now, defaults are max_rows=20000 and batch_size=200.
     main()
