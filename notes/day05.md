@@ -1,0 +1,3 @@
+	•       What an embedding vector represents: a fixed-size vector representation (embedding) given texts or images.
+        •       What cosine similarity means at a high level: Cosine similarity measures the semantic closeness of two sentences by calculating the cosine of the angle between their vector representations. 
+	•	One reason chunking affects retrieval quality: Chunking improves retrieval quality in sentence transformation by breaking text into smaller, semantically focused units, allowing embedding models to match user queries with precise, relevant information rather than broad documents. Proper chunking increases precision and recall, reduces hallucinations, and optimizes search speed.
