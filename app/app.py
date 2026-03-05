@@ -31,6 +31,8 @@ from src.rag_retrieve import retrieve
 # Import BigQuery logger for events.
 from src.bq_log_event import log_event
 
+from src.rag_answer_local import answer_from_retrieval
+from src.bq_log_event_v2 import log_event_v2
 
 # -----------------------------
 # Page config (do this before other Streamlit calls)
@@ -112,6 +114,14 @@ with left_col:
             dedupe_field="doc_id",
             candidate_multiplier=5,
         )
+        # Generate a deterministic grounded answer from retrieved sources (no LLM).
+        ans = answer_from_retrieval(user_text, retrieval_payload["results"])
+
+        # Build a compact citations line for display.
+        # Format: [doc_id:chunk_id]
+        citeline = "Citations: " + ", ".join(
+                [f"[{c['doc_id']}:{c['chunk_id']}]" for c in ans["citations"]]
+        ) if ans["citations"] else "Citations: (none)"
 
         # 4) Store retrieval in session_state so the right panel can display it.
         st.session_state["latest_retrieval"] = retrieval_payload
@@ -119,11 +129,13 @@ with left_col:
 
         # 5) Minimal assistant response for Day 6:
         #    We are not generating a full answer yet; we just confirm retrieval happened.
-        assistant_text = (
-            f"I retrieved {len(retrieval_payload['results'])} sources "
-            f"(latency ~{retrieval_payload['latency_ms']} ms). "
-            "See the Retrieval Debugger on the right."
-        )
+        #assistant_text = (
+        #    f"I retrieved {len(retrieval_payload['results'])} sources "
+        #    f"(latency ~{retrieval_payload['latency_ms']} ms). "
+        #    "See the Retrieval Debugger on the right."
+        #)
+        #st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
+        assistant_text = ans["answer"] + "\n\n" + citeline
         st.session_state["messages"].append({"role": "assistant", "content": assistant_text})
 
         # 6) Log this turn to BigQuery.
@@ -145,6 +157,23 @@ with left_col:
             latency_ms=retrieval_payload["latency_ms"],
         )
 
+        # Log v2 telemetry (answer + citation signal).
+        log_event_v2(
+            session_id=st.session_state["session_id"],
+            turn_id=turn_id,
+            query=user_text,
+            dedupe_field=retrieval_payload["dedupe_field"],
+            top_k=len(retrieval_payload["results"]),
+            candidate_multiplier=5,
+            k_candidates=retrieval_payload["k_candidates"],
+            retrieved_chunk_ids=retrieved_chunk_ids,
+            retrieved_doc_ids=retrieved_doc_ids,
+            latency_ms=retrieval_payload["latency_ms"],
+            answer_len=len(ans["answer"]),
+            has_citations=(len(ans["citations"]) > 0),
+            n_citations=len(ans["citations"]),
+            refusal=bool(ans["refusal"]),
+        )
         # 7) Force rerun so the newly appended messages appear immediately.
         st.rerun()
 
