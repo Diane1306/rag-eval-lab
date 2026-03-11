@@ -21,6 +21,58 @@
 import re  # Used for simple sentence splitting and cleanup.
 from typing import List, Dict, Any  # Type hints for clarity.
 
+# -----------------------------
+# Evidence-gating configuration
+# -----------------------------
+
+# If the embedding score is extremely low AND keyword overlap is weak, we refuse.
+# We set this low because you observed valid answers around ~0.49.
+LOW_SCORE_THRESHOLD = 0.40
+
+# Require at least this many query keywords to appear in retrieved text to consider it supported.
+MIN_KEYWORD_HITS = 2
+
+# A small stopword list (keep it minimal; we only want to remove very common words).
+STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with", "by", "as",
+    "is", "are", "was", "were", "be", "been", "being", "it", "this", "that", "these", "those",
+    "what", "when", "where", "who", "why", "how", "which",
+}
+
+def _extract_keywords(query: str) -> list[str]:
+    """
+    Extract simple keywords from the query.
+
+    Rule:
+      - lowercase alphanumeric tokens
+      - length >= 5 (filters out tiny words)
+      - not in STOPWORDS
+
+    Output:
+      - list of keyword strings
+    """
+    tokens = re.findall(r"[a-z0-9]+", query.lower())
+    keywords = [t for t in tokens if len(t) >= 5 and t not in STOPWORDS]
+    return keywords
+
+
+def _keyword_hit_count(keywords: list[str], retrieved_text: str) -> int:
+    """
+    Count how many query keywords appear (exact substring match) in retrieved_text.
+
+    Note:
+      - This is intentionally simple and deterministic.
+      - We use exact substring presence, not stemming.
+
+    Output:
+      - integer count of matched keywords (unique keyword hits)
+    """
+    haystack = retrieved_text.lower()
+    hits = 0
+    for kw in set(keywords):
+        if kw in haystack:
+            hits += 1
+    return hits
 
 def _split_sentences(text: str) -> List[str]:
     """
@@ -80,20 +132,27 @@ def _pick_support_sentences(query: str, text: str, max_sentences: int = 2) -> Li
     return [s for _, s in scored[:max_sentences]]
 
 
-def answer_from_retrieval(query: str, retrieved: List[Dict[str, Any]]) -> Dict[str, Any]:
+def answer_from_retrieval(query: str, retrieved: List[Dict[str, Any]], top_score: float | None = None) -> Dict[str, Any]:
     """
-    Deterministically generate an answer + citations from retrieved chunks.
+    Deterministically generate an answer + citations from retrieved chunks,
+    with an "evidence gate" to refuse when support is weak.
 
-    Logic:
-      - If no retrieved results, refuse.
-      - Otherwise, extract 1–2 support sentences from top chunks.
-      - Return a short answer with citations.
+    Inputs:
+      - query: user question
+      - retrieved: retrieval results list (each dict has chunk_id/doc_id/title/text_preview/text/score)
+      - top_score: similarity score of the best retrieved item (optional but recommended)
+
+    Evidence gate (refusal):
+      - If retrieved is empty -> refuse
+      - Else compute keyword overlap between query and concatenated retrieved text
+      - Refuse only when:
+          keyword_hits < MIN_KEYWORD_HITS  AND  (top_score is not None and top_score < LOW_SCORE_THRESHOLD)
 
     Returns:
       - {answer, citations, refusal, refusal_reason}
     """
 
-    # If nothing retrieved, we cannot ground an answer.
+    # 1) If nothing retrieved, we cannot ground an answer.
     if not retrieved:
         return {
             "answer": "I don’t know based on the provided sources.",
@@ -102,10 +161,34 @@ def answer_from_retrieval(query: str, retrieved: List[Dict[str, Any]]) -> Dict[s
             "refusal_reason": "No retrieved chunks were available to support an answer.",
         }
 
-    # Use up to the top 3 retrieved chunks to build a short answer.
-    top = retrieved[:3]
+    # 2) Build a combined text blob from the top-k retrieved results for overlap checks.
+    # Prefer full text if present; otherwise use text_preview.
+    combined = []
+    for r in retrieved:
+        combined.append(str(r.get("text", r.get("text_preview", ""))))
+    combined_text = "\n".join(combined)
 
-    # Collect support sentences and citations.
+    # 3) Extract query keywords and compute how many appear in retrieved text.
+    keywords = _extract_keywords(query)
+    keyword_hits = _keyword_hit_count(keywords, combined_text)
+
+    # 4) Evidence gate:
+    # Refuse only if overlap is weak AND score is extremely low.
+    if top_score is not None:
+        if keyword_hits < MIN_KEYWORD_HITS and top_score < LOW_SCORE_THRESHOLD:
+            return {
+                "answer": "I don’t know based on the provided sources.",
+                "citations": [],
+                "refusal": True,
+                "refusal_reason": (
+                    f"Weak evidence: keyword_hits={keyword_hits} (<{MIN_KEYWORD_HITS}) "
+                    f"and top_score={top_score:.3f} (<{LOW_SCORE_THRESHOLD})."
+                ),
+            }
+
+    # 5) Otherwise, proceed with the original deterministic extractive answer logic.
+    top = retrieved[:3]  # Use top 3 results to form a concise answer.
+
     answer_parts = []
     citations = []
 
@@ -113,20 +196,14 @@ def answer_from_retrieval(query: str, retrieved: List[Dict[str, Any]]) -> Dict[s
         doc_id = str(r.get("doc_id", ""))
         chunk_id = str(r.get("chunk_id", ""))
 
-        # Prefer full text if available, else fall back to preview.
         text = r.get("text", r.get("text_preview", ""))
 
-        # Pick a couple supporting sentences.
         support = _pick_support_sentences(query=query, text=text, max_sentences=2)
-
-        # If we got useful text, add it to the answer.
         if support:
             answer_parts.append(" ".join(support))
 
-        # Add a citation entry (even if support was weak; it’s still the source we referenced).
         citations.append({"doc_id": doc_id, "chunk_id": chunk_id})
 
-    # If we somehow extracted nothing, refuse conservatively.
     if not answer_parts:
         return {
             "answer": "I don’t know based on the provided sources.",
@@ -135,7 +212,6 @@ def answer_from_retrieval(query: str, retrieved: List[Dict[str, Any]]) -> Dict[s
             "refusal_reason": "Retrieved chunks did not contain extractable supporting sentences.",
         }
 
-    # Join extracted sentences into one concise answer paragraph.
     answer = " ".join(answer_parts).strip()
 
     return {

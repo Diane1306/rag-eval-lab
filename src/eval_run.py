@@ -83,7 +83,8 @@ def run_eval(dedupe_field: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
             candidate_multiplier=CANDIDATE_MULTIPLIER,
         )
 
-        ans = answer_from_retrieval(query, r["results"])
+        top_score = r["results"][0]["score"] if r["results"] else None
+        ans = answer_from_retrieval(query, r["results"], top_score=top_score)
 
         # Metrics
         latencies.append(int(r["latency_ms"]))

@@ -115,7 +115,8 @@ with left_col:
             candidate_multiplier=5,
         )
         # Generate a deterministic grounded answer from retrieved sources (no LLM).
-        ans = answer_from_retrieval(user_text, retrieval_payload["results"])
+        top_score = retrieval_payload["results"][0]["score"] if retrieval_payload["results"] else None
+        ans = answer_from_retrieval(user_text, retrieval_payload["results"], top_score=top_score)
 
         # Build a compact citations line for display.
         # Format: [doc_id:chunk_id]
