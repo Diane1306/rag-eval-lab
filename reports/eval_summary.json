@@ -1,0 +1,27 @@
+{
+  "run_ts": "2026-03-11T05:13:24.503718+00:00",
+  "runs": [
+    {
+      "dedupe_field": "doc_id",
+      "n": 20,
+      "refusal_rate_overall": 0.25,
+      "refusal_rate_answerable": 0.1,
+      "refusal_rate_unanswerable": 0.4,
+      "citation_rate_nonrefusal": 1.0,
+      "latency_p50_ms": 22,
+      "latency_p95_ms": 44,
+      "diversity_avg_unique_doc_ids": 5.0
+    },
+    {
+      "dedupe_field": "title",
+      "n": 20,
+      "refusal_rate_overall": 0.25,
+      "refusal_rate_answerable": 0.1,
+      "refusal_rate_unanswerable": 0.4,
+      "citation_rate_nonrefusal": 1.0,
+      "latency_p50_ms": 19,
+      "latency_p95_ms": 25,
+      "diversity_avg_unique_doc_ids": 3.7
+    }
+  ]
+}

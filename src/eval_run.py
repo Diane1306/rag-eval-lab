@@ -182,7 +182,23 @@ def main():
         print(f"  latency_p95_ms:            {s['latency_p95_ms']}")
         print(f"  diversity_avg_unique_docs: {s['diversity_avg_unique_doc_ids']:.2f}")
         print("-" * 80)
+    from datetime import datetime, timezone
+    import json
+    from pathlib import Path
 
+    SUMMARY_PATH = Path("reports/eval_summary.json")
+    SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    summary_blob = {
+        "run_ts": datetime.now(timezone.utc).isoformat(),
+        "runs": [sum_doc, sum_title],
+    }
+
+    with SUMMARY_PATH.open("w", encoding="utf-8") as f:
+        json.dump(summary_blob, f, ensure_ascii=False, indent=2)
+
+    print(f"Wrote summary -> {SUMMARY_PATH}")
+    
     # Show 3 examples where doc_id vs title behaved differently (by diversity)
     # (Heuristic: compare diversity_unique_doc_ids for same qid between two runs.)
     diff = []
